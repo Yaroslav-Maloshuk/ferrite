@@ -39,7 +39,7 @@ candle-core = "0.11.0"
 candle-nn = "0.11.0"
 candle-transformers = "0.11.0"
 tokenizers = "0.23"
-hf-hub = "1.0.0"
+hf-hub = { version = "1.0.0", features = ["blocking"] }
 lancedb = { version = "0.38.0", features = ["remote"] }
 arrow-array = "58.0.0"
 arrow-schema = "58.0.0"
