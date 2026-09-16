@@ -156,4 +156,40 @@ mod tests {
             assert!(dot > 0.999, "batch[{i}] vs single dot={dot}");
         }
     }
+
+    #[test]
+    fn embed_truncates_long_text() {
+        let embedder = Embedder::load(&cfg()).unwrap();
+        let long = "ferrite ".repeat(10_000);
+        let out = embedder.embed(&[long]).unwrap();
+        assert_eq!(out[0].len(), 384);
+        assert!(out[0].iter().all(|x| x.is_finite()));
+    }
+
+    #[test]
+    fn embed_empty_string_yields_finite_384dim() {
+        let embedder = Embedder::load(&cfg()).unwrap();
+        let out = embedder.embed(&[String::new()]).unwrap();
+        assert_eq!(out[0].len(), 384);
+        assert!(out[0].iter().all(|x| x.is_finite()));
+    }
+
+    #[test]
+    fn embed_unicode_and_emoji() {
+        let embedder = Embedder::load(&cfg()).unwrap();
+        let texts = vec![
+            "Привет, мир! Как дела?".to_string(),
+            "🇺🇸 🇩🇪 🇫🇷 hello, café, ñoño".to_string(),
+        ];
+        let out = embedder.embed(&texts).unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|v| v.iter().all(|x| x.is_finite())));
+    }
+
+    #[test]
+    fn embed_zero_texts_is_empty() {
+        let embedder = Embedder::load(&cfg()).unwrap();
+        let out = embedder.embed(&[]).unwrap();
+        assert!(out.is_empty());
+    }
 }
