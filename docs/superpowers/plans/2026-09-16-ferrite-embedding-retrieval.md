@@ -61,6 +61,7 @@ path = "src/bin/ferrite.rs"
 [[bin]]
 name = "ferrite-bench"
 path = "src/bin/bench.rs"
+required-features = ["bench"]
 
 [features]
 default = []
@@ -137,6 +138,8 @@ pub enum FerriteError {
     Http(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Candle(#[from] candle::Error),
     #[error("{0}")]
     Other(String),
 }
@@ -644,8 +647,8 @@ fn embed_zero_texts_is_empty() {
 
 - [ ] **Step 2: Run to verify fails**
 
-Run: `cargo test embed_` 
-Expected: truncation/empty/unicode tests — the long-text and empty-string tests may already pass; if so, intentionally make them fail by asserting the wrong thing once, then revert. The gate for this task is: each test has been seen failing OR is newly added and passes for a reason you can explain.
+Run: `cargo test embed_` (each new edge-case test in turn).
+Expected: all four fail with the module/complex behavior they exercise — truncation relies on tokenizer truncation (verify the encoded length is capped), empty string must not panic, unicode must not panic. Implement the guards that make them pass.
 
 - [ ] **Step 3: Implement behavior**
 
@@ -844,11 +847,22 @@ impl VectorStore {
             .await
         {
             Ok(t) => t,
-            Err(_) => db
-                .create_table("questions", schema())
-                .execute()
-                .await
-                .map_err(|e| FerriteError::Database(e.to_string()))?,
+            Err(_) => {
+                // create_table takes RecordBatch data (not a bare schema);
+                // seed it with a zero-row batch carrying the right schema.
+                use arrow_array::{new_empty_array, ArrayRef};
+                let cols: Vec<ArrayRef> = schema()
+                    .fields()
+                    .iter()
+                    .map(|f| new_empty_array(f.data_type()))
+                    .collect();
+                let empty = RecordBatch::try_new(schema(), cols)
+                    .map_err(|e| FerriteError::Database(e.to_string()))?;
+                db.create_table("questions", empty)
+                    .execute()
+                    .await
+                    .map_err(|e| FerriteError::Database(e.to_string()))?
+            }
         };
         Ok(Self { table })
     }
@@ -865,7 +879,6 @@ impl VectorStore {
         }
         let ids: StringArray = items.iter().map(|i| Some(i.id.as_str())).collect();
         let texts: StringArray = items.iter().map(|i| Some(i.text.as_str())).collect();
-        let flattened: Vec<f32> = embeddings.iter().flatten().copied().collect();
         let vectors = FixedSizeListArray::from_iter_primitive::<arrow_array::types::Float32Type, _, _>(
             embeddings
                 .iter()
@@ -877,7 +890,6 @@ impl VectorStore {
             vec![Arc::new(ids), Arc::new(texts), Arc::new(vectors)],
         )
         .map_err(|e| FerriteError::Database(e.to_string()))?;
-        let _ = flattened;
         self.table
             .add(RecordBatchIterator::new(
                 vec![Ok(batch)],
@@ -2028,6 +2040,7 @@ mod bench_runner_test {
         };
         let dataset = tmp.path().join("quora_questions.jsonl");
         std::fs::write(&dataset, "the cat sits outside\na man is playing guitar\npasta is delicious\n").unwrap();
+        let out = tmp.path().join("report.json");
         let cfg = BenchConfig {
             label: "test".into(),
             target: Target::Lib,
@@ -2037,18 +2050,16 @@ mod bench_runner_test {
             n_queries: 3,
             top_k: 2,
             dataset: dataset.clone(),
-            out: tmp.path().join("report.json"),
+            out: out.clone(),
         };
         let report = run_bench(&cfg).await.unwrap();
         assert!(report.metrics.rps > 0.0);
         assert!(report.metrics.p99_ms >= 0.0);
         assert!(report.metrics.peak_rss_mb > 0);
-        assert!(report.out_file_exists = true); // see step 3
+        assert!(out.is_file(), "report file must be written when --out is set");
     }
 }
 ```
-
-(Replace the last assertion-with-trait-syntax with a real `assert!(report.out_path.is_file())` if the struct carries the path, else check via `std::path`.)
 
 - [ ] **Step 2: Run to verify fails**
 
@@ -2057,11 +2068,9 @@ Expected: FAIL — `BenchConfig`/`run_bench` not found.
 
 - [ ] **Step 3: Implement**
 
-In `src/bench/mod.rs`, add types + runner and `mod http_target;`.
+In `src/bench/mod.rs`, add types + a `run_once` helper and the deterministic report builder, plus `mod http_target;`.
 
 ```rust
-use source::http_target::search_over_http;
-
 pub enum Target {
     Lib,
     Http(String),
@@ -2080,74 +2089,91 @@ pub struct BenchConfig {
 }
 ```
 
-Helper `load_questions(path, n) -> Vec<String>` reads at most `n` lines.
-
-Lib-target runner (`run_lib`): build `Ferrite` (temp or `config.lance_uri` from env for isolation), ingest first `n_docs`, take `n_queries` probes, then:
+Helper `load_questions(path, n) -> Vec<String>` reads at most `n` lines. The runner:
 
 ```rust
-async fn bench_lib(ferrite: Arc<Ferrite>, probes: Vec<String>, cfg: &BenchConfig)
-    -> (Histogram<u64>, u64)
-{
-    measure_window(cfg.concurrency, Duration::from_secs(cfg.window_secs), || {
-        let f = ferrite.clone();
-        let q = probes[0].clone();
-        async move {
-            let start = std::time::Instant::now();
-            let _ = f.search(&q, cfg.top_k).await?;
-            Ok(start.elapsed())
-        }
-    }).await
+async fn run_once(cfg: &BenchConfig) -> anyhow::Result<(Histogram<u64>, u64)> {
+    // prepare: for Lib, ingest first cfg.n_docs into an in-process Ferrite
+    // (temp store under std::env::temp_dir()); for Http, the ingestion is
+    // handled by http_target (Task 15) — until then HTTP mode errors.
+    let probes = load_questions(&cfg.dataset, cfg.n_queries);
+    let mut i = 0usize;
+    let (hist, count) = measure_window(
+        cfg.concurrency,
+        Duration::from_secs(cfg.window_secs),
+        move || {
+            let q = probes[i % probes.len()].clone();
+            i += 1;
+            let ferrite = ferrite.clone();
+            async move {
+                let start = std::time::Instant::now();
+                ferrite.search(&q, cfg.top_k).await?;
+                Ok(start.elapsed())
+            }
+        },
+    )
+    .await;
+    Ok((hist, count))
 }
-```
 
-But reusing the same probe repeatedly is a degenerate measurement — instead cycle probes: `let probe_idx = &mut counter; let q = probes[counter % probes.len()].clone();`.
-
-HTTP target (`src/bench/http_target.rs`):
-
-```rust
-pub async fn search_over_http(base: &str, query: &str, top_k: usize) -> anyhow::Result<f64> {
-    let client = reqwest::Client::new();
-    let start = std::time::Instant::now();
-    let resp = client
-        .post(format!("{base}/v1/search"))
-        .json(&serde_json::json!({"query": query, "top_k": top_k}))
-        .send()
-        .await?;
-    let _status = resp.status();
-    let _body = resp.text().await?;
-    Ok(start.elapsed().as_secs_f64())
-}
-```
-
-`run_bench` dispatches on `Target` and returns a `BenchReport` with metrics derived from the histogram + peak RSS (peak RSS is taken from the target process — for HTTP mode this measures the bench client, so note in comments that container RAM measurement is a Task 12 wiring addition; acceptable for the initial report).
-
-`ramp_and_report`:
-
-```rust
-pub async fn ramp_and_report(cfg: &BenchConfig) -> anyhow::Result<BenchReport> {
+pub async fn run_bench(cfg: &BenchConfig) -> anyhow::Result<BenchReport> {
+    // warmup: one short run at 1/4 concurrency, then the measured run
+    let (hist, count) = run_once(cfg).await?;
+    let params = Params {
+        n_docs: cfg.n_docs,
+        n_queries: cfg.n_queries,
+        top_k: cfg.top_k,
+        concurrency: cfg.concurrency,
+        window_secs: cfg.window_secs,
+    };
+    let (p50, p99, p999) = ms(&hist);
+    let rps = count as f64 / cfg.window_secs as f64;
     let env = EnvInfo::current();
-    let cores = env.cores;
-    // warmup
-    let mut best: Option<(f64, f64)> = None; // (rps, p99_us)
-    for c in [1, 2, 4, 8, cores, cores * 2] {
+    let metrics = Metrics {
+        p50_ms: p50,
+        p99_ms: p99,
+        p999_ms: p999,
+        rps,
+        rps_per_core: rps / env.cores.max(1) as f64,
+        peak_rss_mb: peak_rss_kb() / 1024,
+    };
+    let report = BenchReport { label: cfg.label.clone(), env, params, metrics };
+    if !cfg.out.as_os_str().is_empty() {
+        if let Some(parent) = cfg.out.parent() { std::fs::create_dir_all(parent)?; }
+        std::fs::write(&cfg.out, serde_json::to_string_pretty(&report)?)?;
+    }
+    Ok(report)
+}
+
+pub async fn ramp_and_report(cfg: &BenchConfig) -> anyhow::Result<BenchReport> {
+    let cores = EnvInfo::current().cores;
+    let mut best: Option<(f64, Histogram<u64>, u64)> = None;
+    for c in [1usize, 2, 4, 8, cores, cores * 2] {
         let c = c.max(1);
-        let cfg_c = BenchConfig { concurrency: c, ..bench_clone(cfg) };
-        let (hist, count) = run_bench_measured(&cfg_c).await?;
-        let dur = cfg.window_secs as f64;
-        let rps = count as f64 / dur;
-        if best.map_or(true, |(br, _)| rps > br) {
-            best = Some((rps, hist.value_at_quantile(0.99) as f64));
+        let run_cfg = BenchConfig { concurrency: c, ..clone_cfg(cfg) };
+        let (hist, count) = run_once(&run_cfg).await?;
+        let rps = count as f64 / run_cfg.window_secs as f64;
+        if best.as_ref().map_or(true, |(br, ..)| rps > *br) {
+            best = Some((rps, hist, count));
         }
     }
-    // rebuild metrics for the winning concurrency
-    ...
-    Ok(BenchReport { label, env, params, metrics })
+    let (rps, hist, count) = best.expect("at least one ramp point");
+    let (p50, p99, p999) = ms(&hist);
+    let env = EnvInfo::current();
+    let metrics = Metrics {
+        p50_ms: p50, p99_ms: p99, p999_ms: p999,
+        rps, rps_per_core: rps / env.cores.max(1) as f64,
+        peak_rss_mb: peak_rss_kb() / 1024,
+    };
+    let report = BenchReport { label: cfg.label.clone(), env, params:
+        Params { n_docs: cfg.n_docs, n_queries: cfg.n_queries, top_k: cfg.top_k,
+                 concurrency: 0, window_secs: cfg.window_secs }, metrics };
+    // write report if cfg.out set (same write as run_bench)
+    Ok(report)
 }
 ```
 
-Keep it implementable but not over-complex: `run_bench` does warmup (one quarter-window), then the measured window; the ramp wrapper runs `run_bench` at each concurrency and keeps the max-RPS report. (Note: each `run_bench` re-ingests for lib mode — acceptable; ingest excluded from timings.)
-
-Simplify the test to match this design: call `run_bench` once at fixed concurrency.
+Where `clone_cfg(cfg)` clones with the given override (implement as a small `BenchConfig::with_concurrency(&self, c) -> Self`). The lib-mode `run_once` needs access to the `Ferrite` — restructure `run_once` to take an `Arc<Ferrite>` for Lib mode and build it in `run_bench`/`ramp_and_report` before calling (single initialization per bench invocation). Dispatch harnesses you build must follow this seam: **initialize `Ferrite` once per bench invocation, reuse across ramp points**.
 
 - [ ] **Step 4: Wire `run` CLI subcommand**
 
@@ -2492,15 +2518,48 @@ git add docker docker-compose.yml && git commit -m "feat: docker compose orchest
 **Interfaces:**
 - Consumes: HTTP-mode ingest flow so service-mode benches truly exercise service ingest + search.
 
-- [ ] **Step 1: Write failing test** (parity of report schema across targets)
+- [ ] **Step 1: Write failing test** (HTTP mode ingests through a real server)
 
-Assert JSON keys of a lib-target and http-target (mock server via `axum` in-test router) report are byte-identical in structure.
+Spin an in-test axum server on an ephemeral port backed by a real `Ferrite` (temp store), run `run_bench` with `Target::Http("http://127.0.0.1:{port}")`, and assert the report has `rps > 0` and a non-empty `params`. Use `tokio::task::spawn` for the listener with a graceful `oneshot` shutdown.
 
-Run, FAIL.
+```rust
+#[tokio::test]
+async fn http_target_ingests_and_searches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = FerriteConfig { lance_uri: tmp.join("lance").display().to_string(), ..Default::default() };
+    let ferrite = std::sync::Arc::new(Ferrite::init(&config).await.unwrap());
+    let app = crate::http::router(ferrite.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(async move {
+        let _ = tokio::select! {
+            _ = axum::serve(listener, app) => {}
+            _ = rx => {}
+        };
+    });
+    let dataset = tmp.path().join("quora_questions.jsonl");
+    std::fs::write(&dataset, "cat on a couch\nguitar player\npasta recipe\n").unwrap();
+    let out = tmp.path().join("report.json");
+    let cfg = BenchConfig {
+        label: "http-test".into(),
+        target: Target::Http(format!("http://{addr}")),
+        concurrency: 2, window_secs: 1,
+        n_docs: 3, n_queries: 3, top_k: 2,
+        dataset, out: out.clone(),
+    };
+    let report = run_bench(&cfg).await.unwrap();
+    assert!(report.metrics.rps > 0.0);
+    let _ = tx.send(());
+    handle.await.unwrap();
+}
+```
+
+Run, expected FAIL — HTTP mode not implemented yet. If `http_target` returns an error for HTTP mode, the failing assertion is "HTTP mode benches without error"; make the harness return that error so the test fails on it.
 
 - [ ] **Step 2: Implement**
 
-In HTTP mode, before the measured window: build items from first `n_docs` lines, `POST /v1/ingest`, wait for 200, then proceed. Guard: if `POST /v1/ingest` errors (e.g. already ingested) treat connection/status errors as fatal; idempotent re-ingest allowed (duplicates acceptable for benchmark because dedup happens at query time).
+In HTTP mode, before the measured window: build items from first `n_docs` lines, `POST /v1/ingest`, require 200, then proceed. Guard: connection/status errors are fatal; `POST /v1/ingest` may be re-run safely (duplicates are acceptable for the benchmark). Search requests are `POST /v1/search {query, top_k}`, timed per request. Keep the `search_over_http` helper from Task 11; add `ingest_over_http`.
 
 - [ ] **Step 3: Verify**
 
