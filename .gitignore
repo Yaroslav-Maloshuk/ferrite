@@ -1,0 +1,4 @@
+/target
+/data
+*.lock
+.DS_Store

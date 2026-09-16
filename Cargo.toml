@@ -1,0 +1,61 @@
+[package]
+name = "ferrite"
+version = "0.1.0"
+edition = "2024"
+description = "Rust-native embedding (Candle) + retrieval (LanceDB) pipeline"
+license = "MIT"
+rust-version = "1.98"
+
+[lib]
+name = "ferrite"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ferrite"
+path = "src/bin/ferrite.rs"
+
+[[bin]]
+name = "ferrite-bench"
+path = "src/bin/bench.rs"
+required-features = ["bench"]
+
+[features]
+default = []
+bench = []
+accelerate = ["candle-core/accelerate"]
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util"] }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+candle-transformers = "0.11.0"
+tokenizers = "0.23"
+hf-hub = "1.0.0"
+lancedb = { version = "0.38.0", features = ["remote"] }
+arrow-array = "58.0.0"
+arrow-schema = "58.0.0"
+arrow-buffer = "58.0.0"
+arrow-select = "58.0.0"
+hdrhistogram = "7"
+parquet = { version = "58.0.0", features = ["arrow"] }
+reqwest = { version = "0.12", features = ["json", "http2"] }
+futures = "0.3"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
