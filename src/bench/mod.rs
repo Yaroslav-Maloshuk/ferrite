@@ -3,6 +3,8 @@ use std::time::Duration;
 use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
 
+pub mod dataset;
+
 pub const DATASET_JSONL: &str = "quora_questions.jsonl";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
