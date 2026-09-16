@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+langchain>=0.3
+langchain-community>=0.3
+sentence-transformers
+chromadb
+pydantic
+httpx
+pytest
