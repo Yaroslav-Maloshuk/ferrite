@@ -1,6 +1,7 @@
 pub mod config;
 pub mod embedding;
 pub mod error;
+pub mod http;
 pub mod pipeline;
 pub mod pooling;
 pub mod store;

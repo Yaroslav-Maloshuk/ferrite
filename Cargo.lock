@@ -2331,6 +2331,7 @@ dependencies = [
  "futures",
  "hdrhistogram",
  "hf-hub",
+ "http-body-util",
  "lancedb",
  "libc",
  "parquet",

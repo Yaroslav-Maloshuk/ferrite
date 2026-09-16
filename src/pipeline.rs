@@ -1,16 +1,17 @@
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{FerriteConfig, IndexMode};
 use crate::embedding::Embedder;
 use crate::error::FerriteError;
 use crate::store::{SearchHit, StoredItem, VectorStore};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestItem {
     pub id: String,
     pub text: String,
+    #[serde(default)]
     pub metadata: Option<String>,
 }
 
@@ -44,6 +45,10 @@ impl Ferrite {
             store: Arc::new(store),
             config,
         })
+    }
+
+    pub fn config_model(&self) -> String {
+        format!("{}@{}", self.config.model_repo, self.config.model_revision)
     }
 
     pub async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, FerriteError> {
@@ -93,7 +98,7 @@ impl Ferrite {
         Ok(Stats {
             rows,
             index: self.config.index,
-            model: format!("{}@{}", self.config.model_repo, self.config.model_revision),
+            model: self.config_model(),
             dim: self.embedder.dim(),
         })
     }
