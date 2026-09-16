@@ -47,6 +47,7 @@ def create_app(persist_dir: str | None = None, model_name: str | None = None) ->
         if _model is None:
             _model = SentenceTransformerEmbeddings(
                 model_name=_model_name,
+                model_kwargs={"revision": "refs/pr/21"},
                 encode_kwargs={"normalize_embeddings": True},
             )
         return _model
@@ -68,11 +69,11 @@ def create_app(persist_dir: str | None = None, model_name: str | None = None) ->
         return JSONResponse(status_code=status, content={"error": msg})
 
     @app.get("/v1/health")
-    async def health():
+    def health():
         return {"status": "ok"}
 
     @app.get("/v1/stats")
-    async def stats():
+    def stats():
         _ = _get_model()
         collection = _get_collection()
         count = collection.count()
@@ -84,7 +85,7 @@ def create_app(persist_dir: str | None = None, model_name: str | None = None) ->
         }
 
     @app.post("/v1/embed")
-    async def embed(req: EmbedRequest):
+    def embed(req: EmbedRequest):
         if not req.texts:
             return _json_err(400, "texts must be non-empty")
         if len(req.texts) > 256:
@@ -100,7 +101,7 @@ def create_app(persist_dir: str | None = None, model_name: str | None = None) ->
         }
 
     @app.post("/v1/ingest")
-    async def ingest(req: IngestRequest):
+    def ingest(req: IngestRequest):
         if not req.items:
             return _json_err(400, "items must be non-empty")
         collection = _get_collection()
@@ -114,10 +115,10 @@ def create_app(persist_dir: str | None = None, model_name: str | None = None) ->
         return {"ingested": len(req.items)}
 
     @app.post("/v1/search")
-    async def search(req: SearchRequest):
+    def search(req: SearchRequest):
         if not req.query.strip():
             return _json_err(400, "query must be non-empty")
-        top_k = max(1, min(1000, req.top_k or 10))
+        top_k = max(1, min(1000, req.top_k if req.top_k is not None else 10))
         collection = _get_collection()
         query_embedding = _embed([req.query])
         results = collection.query(
