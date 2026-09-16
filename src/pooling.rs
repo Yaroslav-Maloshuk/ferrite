@@ -59,8 +59,8 @@ mod tests {
         let mask = t(&[0., 0., 0., 1., 0., 0.], &[2, 3]);
         let pooled = super::mask_mean_pool(&emb, &mask).unwrap();
         let got: Vec<f32> = pooled.flatten_all().unwrap().to_vec1().unwrap();
-        // all-padding row must be zeros, not NaN/Inf
-        assert!(got[0].is_finite() && got[1] == 0.0);
+        // row0 is all-padding: BOTH elements must be exactly zero, not NaN/Inf
+        assert_eq!(&got[0..2], &[0., 0.]);
         assert_eq!(&got[2..], &[7., 8.]);
     }
 
