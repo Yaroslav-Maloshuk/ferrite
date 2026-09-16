@@ -281,4 +281,27 @@ mod tests {
         let hits = store.search(&vec![0.5; 384], 1000).await.unwrap();
         assert_eq!(hits.len(), 1);
     }
+
+    #[tokio::test]
+    async fn top_k_zero_clamps_to_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = VectorStore::open(&cfg(tmp.path())).await.unwrap();
+        store
+            .add(
+                &[StoredItem {
+                    id: "x".into(),
+                    text: "only one".into(),
+                    metadata: None,
+                }],
+                &[vec![0.5; 384]],
+            )
+            .await
+            .unwrap();
+        let hits = store.search(&vec![0.5; 384], 0).await.unwrap();
+        assert!(
+            !hits.is_empty(),
+            "top_k=0 must clamp to 1, not truncate to zero"
+        );
+        assert_eq!(hits.len(), 1);
+    }
 }
