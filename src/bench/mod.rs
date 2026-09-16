@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::FerriteConfig;
 use crate::pipeline::{Ferrite, IngestItem};
 
+pub mod compare;
 pub mod dataset;
 pub mod http_target;
 

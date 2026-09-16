@@ -2,8 +2,11 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use ferrite::bench::compare::{Comparison, compare, render_table};
 use ferrite::bench::dataset::{TARGET_ROWS, fetch_and_sample};
-use ferrite::bench::{BenchConfig, DATASET_JSONL, Target, ramp_and_report, run_bench};
+use ferrite::bench::{
+    BenchConfig, BenchReport, DATASET_JSONL, EnvInfo, Target, ramp_and_report, run_bench,
+};
 use ferrite::config::FerriteConfig;
 
 #[derive(Parser)]
@@ -44,6 +47,20 @@ enum Command {
         out: PathBuf,
         #[arg(long)]
         ramp: bool,
+    },
+    /// Compare two benchmark reports and emit a comparison JSON.
+    Compare {
+        #[arg(long)]
+        ours: PathBuf,
+        #[arg(long)]
+        baseline: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Render a comparison JSON as a markdown table.
+    Table {
+        #[arg(long)]
+        comparison: PathBuf,
     },
 }
 
@@ -88,6 +105,26 @@ async fn main() -> anyhow::Result<()> {
                 run_bench(&cfg).await?
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::Compare {
+            ours,
+            baseline,
+            out,
+        } => {
+            let read_json = |path: &PathBuf| -> anyhow::Result<BenchReport> {
+                Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+            };
+            let c = compare(&read_json(&ours)?, &read_json(&baseline)?);
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&out, serde_json::to_string_pretty(&c)?)?;
+            println!("comparison written -> {}", out.display());
+        }
+        Command::Table { comparison } => {
+            let c: Comparison = serde_json::from_str(&std::fs::read_to_string(&comparison)?)?;
+            let env = EnvInfo::current();
+            print!("{}", render_table(&c, &env, &env));
         }
     }
     Ok(())
