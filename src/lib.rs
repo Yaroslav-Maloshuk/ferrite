@@ -8,4 +8,7 @@ pub mod store;
 
 pub use config::{FerriteConfig, IndexMode};
 pub use error::FerriteError;
+#[cfg(feature = "bench")]
+pub mod bench;
+
 pub use pipeline::{Ferrite, IngestItem};
