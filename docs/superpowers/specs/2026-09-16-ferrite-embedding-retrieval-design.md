@@ -81,23 +81,28 @@ Validation: `top_k` clamped to `[1, 1000]`; `texts` batch capped (e.g. 256) and 
 
 FastAPI app with the exact same five routes, backed by the LangChain `SentenceTransformerEmbeddings` wrapper -> Chroma (in-process, persistent) vector store. Uses the same `all-MiniLM-L6-v2` model path, same dataset file, same top-k semantics. Its only job is to be the reference for the benchmark. Dependencies pinned in `requirements.txt`.
 
-### 5. Benchmark suite (bin `bench.rs` + `orchestrate.py`)
+### 5. Benchmark suite (bin `src/bin/bench.rs`)
 
-- **Dataset:** deterministic 25,000-question sample (seeded RNG) from `sentence-transformers/quora-duplicates` (HF `datasets`), written once to `data/quora_questions.jsonl`. The same file drives Rust and Python. A tiny generator step (`dataset_gen`) ensures both sides start from byte-identical input.
-- **Harness (Rust, `src/bin/bench.rs`):** drives both targets over HTTP; also supports a `lib` target (in-process facade, no network) for histogram sanity in CI.
-  - *Latency:* warm up, then a fixed-window run at a target concurrency; record per-request latency into `hdrhistogram`; report P50/P99/P99.9.
-  - *Throughput:* concurrency ramp (1, 2, 4, ... cores) until P99 exceeds a saturation threshold or error rate rises; peak sustained success-rate = max RPS; **RPS/core** = max_RPS / logical cores.
-  - *Memory:* sample the target service's peak RSS. Container context: read from `/proc/<pid>/status` `VmHWM` (Linux) else `getrusage.ru_maxrss`.
-  - Output: `data/reports/ferrite.json` / `baseline.json` with identical schema `{metrics, env, params}`.
-- **Orchestration (`benchmark/orchestrate.py`):** runs the harness against both endpoints inside compose, then writes `data/reports/comparison.json` (each metric, per-side value, ratio) and prints the table.
-- **README:** the comparison table is generated from `comparison.json` by a script step at publish time, so the numbers in the README are exactly the measured ones.
+- **Dataset:** the harness itself is dataset-self-contained. `ferrite bench dataset` fetches `sentence-transformers/quora-duplicates` (HF) via the `hf-hub` crate, reads the parquet with `parquet`+`arrow-rs`, takes a deterministic seeded 25,000-question sample, and writes `data/quora_questions.jsonl` (one question per line). The same file feeds Rust and Python — byte-identical input.
+- **Harness:** `ferrite bench run --target <http|lib>` drives the target over HTTP (or in-process facade), with a lib-target mode for CI histogram sanity.
+  - *Latency:* warm-up, then a fixed-window run at a target concurrency; per-request latency recorded into `hdrhistogram`; report P50/P99/P99.9.
+  - *Throughput:* concurrency ramp (1, 2, 4, ... cores) until P99 breaches a saturation threshold; peak sustained success-rate = max RPS; **RPS/core** = max_RPS / logical cores.
+  - *Memory:* sample target service peak RSS (`/proc/<pid>/status` `VmHWM` on Linux, else `getrusage.ru_maxrss`).
+  - Output: `data/reports/ferrite.json` / `baseline.json`, identical `{metrics, env, params}` schema.
+- **Comparison:** `ferrite bench compare ferrite.json baseline.json` writes `data/reports/comparison.json` (per-metric ratios); `ferrite bench table` renders the markdown table for the README from that file, so README numbers are exactly the measured ones.
 
 ### 6. Docker Compose
 
 - `ferrite` service: build `docker/ferrite.Dockerfile` (multi-stage: bare-builder -> runtime `debian-slim`), model baked in, volume `./data` mounted, port 8080.
 - `baseline` service: build `docker/baseline.Dockerfile`, volume `./data`, port 8081.
-- `bench` service: same image as `ferrite`, command runs dataset gen, the harness vs both targets, and orchestration; exit code non-zero on regression/failure.
+- `bench` service: same image as `ferrite`; command runs `ferrite bench dataset` + `ferrite bench run` against both targets + `compare` + `table`; exit code non-zero on regression/failure.
 - One command: `docker compose up --build` then `docker compose run --rm bench`.
+
+## Datasets / determinism
+
+- Source: `sentence-transformers/quora-duplicates` parquet, fetched via `hf-hub` crate.
+- Sample: 25,000 rows, seeded RNG (fixed seed constant), `text_1` column only, one question per line in `data/quora_questions.jsonl`.
+- Re-use: `ferrite bench dataset` skips download when the file already exists (idempotent).
 
 ## Config (env vars, all with defaults)
 
@@ -126,6 +131,8 @@ FastAPI app with the exact same five routes, backed by the LangChain `SentenceTr
 - **Bench sanity (`bench.rs`):** harness runs against the in-process target, asserts histograms non-empty and metrics in plausible ranges (no network needed).
 
 ## Benchmark Target Environment
+
+The dataset-preparation and orchestration steps are Rust-side (`ferrite bench dataset | run | compare | table`), so the bench container needs only the Ferrite image; the Python baseline is a reference service only.
 
 Baseline numbers in the README are produced on this machine (macOS, Apple Silicon, 14 logical cores / 64 GB) and reproduced inside Docker Linux containers. Both sides run in the same container payload (identical CPU quotas when compared).
 
