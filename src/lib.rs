@@ -7,3 +7,4 @@ pub mod store;
 
 pub use config::{FerriteConfig, IndexMode};
 pub use error::FerriteError;
+pub use pipeline::{Ferrite, IngestItem};
