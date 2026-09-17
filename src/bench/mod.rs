@@ -15,6 +15,11 @@ pub mod http_target;
 
 pub const DATASET_JSONL: &str = "quora_questions.jsonl";
 
+/// Documents ingested (or sent per `/v1/ingest` POST) between embed calls.
+/// `Ferrite::embed` caps batches at `max_text_batch` (256), so anything larger
+/// must be chunked.
+pub const INGEST_BATCH: usize = 256;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvInfo {
     pub cores: usize,
@@ -182,7 +187,8 @@ where
 }
 
 /// Initialize an in-process `Ferrite`, ingest the first `cfg.n_docs` lines of
-/// the dataset, and return it wrapped for reuse across ramp points.
+/// the dataset (batched at [`INGEST_BATCH`] to stay inside the embed cap), and
+/// return it wrapped for reuse across ramp points.
 async fn prepare_lib(cfg: &BenchConfig) -> anyhow::Result<Arc<Ferrite>> {
     let ferrite = Ferrite::init(&cfg.ferrite_config).await?;
     let items: Vec<IngestItem> = load_questions(&cfg.dataset, cfg.n_docs)
@@ -194,7 +200,20 @@ async fn prepare_lib(cfg: &BenchConfig) -> anyhow::Result<Arc<Ferrite>> {
             metadata: None,
         })
         .collect();
-    ferrite.ingest(&items).await?;
+    anyhow::ensure!(
+        !items.is_empty(),
+        "dataset contains no ingest documents: {}",
+        cfg.dataset.display()
+    );
+    let mut ingested = 0usize;
+    for chunk in items.chunks(INGEST_BATCH) {
+        ingested += ferrite.ingest(chunk).await?;
+    }
+    anyhow::ensure!(
+        ingested == items.len(),
+        "ingest stored {ingested} of {} documents",
+        items.len()
+    );
     Ok(Arc::new(ferrite))
 }
 
@@ -359,6 +378,36 @@ mod bench_runner_test {
             out.is_file(),
             "report file must be written when --out is set"
         );
+    }
+
+    #[tokio::test]
+    async fn lib_target_ingests_large_batches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = FerriteConfig {
+            lance_uri: tmp.path().join("lance").display().to_string(),
+            data_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let dataset = tmp.path().join("quora_questions.jsonl");
+        let lines: String = (0..INGEST_BATCH + 50)
+            .map(|i| format!("question number {i}\n"))
+            .collect();
+        std::fs::write(&dataset, lines).unwrap();
+        let cfg = BenchConfig {
+            label: "test-large".into(),
+            target: Target::Lib,
+            concurrency: 2,
+            window_secs: 1,
+            n_docs: INGEST_BATCH + 50,
+            n_queries: 3,
+            top_k: 2,
+            dataset: dataset.clone(),
+            out: tmp.path().join("report.json"),
+            ferrite_config: config,
+        };
+        let report = run_bench(&cfg).await.unwrap();
+        assert_eq!(report.params.n_docs, INGEST_BATCH + 50);
+        assert!(report.metrics.rps > 0.0);
     }
 }
 

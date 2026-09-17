@@ -13,12 +13,8 @@ use hdrhistogram::Histogram;
 use reqwest::Client;
 use serde_json::json;
 
-use super::{BenchConfig, load_questions, measure_window};
+use super::{BenchConfig, INGEST_BATCH, load_questions, measure_window};
 use crate::pipeline::IngestItem;
-
-/// Items shipped per `/v1/ingest` POST. The service caps embed batches at 256
-/// (`max_text_batch`), so anything larger must be chunked.
-const INGEST_BATCH: usize = 256;
 
 /// Shared `reqwest` client for HTTP-mode benchmarks.
 pub(crate) fn http_client() -> anyhow::Result<Client> {
