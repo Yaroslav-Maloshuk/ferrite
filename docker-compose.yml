@@ -1,0 +1,50 @@
+services:
+  ferrite:
+    build:
+      context: .
+      dockerfile: docker/ferrite.Dockerfile
+    ports: ["8080:8080"]
+    volumes: ["./data:/data"]
+    environment:
+      FERRITE_MODEL_DIR: /data/models
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/v1/health"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 10s
+
+  baseline:
+    build:
+      context: ./benchmark/python-baseline
+      dockerfile: docker/Dockerfile
+    ports: ["8081:8081"]
+    volumes: ["./data:/data"]
+    environment:
+      BASELINE_PERSIST_DIR: /data/chroma
+      BASELINE_MODEL: sentence-transformers/all-MiniLM-L6-v2
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/v1/health', timeout=2)"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 10s
+
+  bench:
+    build:
+      context: .
+      dockerfile: docker/ferrite.Dockerfile
+    command: >
+      sh -c "
+      ferrite-bench dataset --out /data/quora_questions.jsonl &&
+      ferrite-bench run --label ferrite --target-http http://ferrite:8080 --dataset /data/quora_questions.jsonl --out /data/reports/ferrite.json --ramp &&
+      ferrite-bench run --label baseline --target-http http://baseline:8081 --dataset /data/quora_questions.jsonl --out /data/reports/baseline.json --ramp &&
+      ferrite-bench compare --ours /data/reports/ferrite.json --baseline /data/reports/baseline.json --out /data/reports/comparison.json &&
+      ferrite-bench table --comparison /data/reports/comparison.json
+      "
+    volumes: ["./data:/data"]
+    depends_on:
+      ferrite:
+        condition: service_healthy
+      baseline:
+        condition: service_healthy
