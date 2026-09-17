@@ -91,7 +91,7 @@ pub fn peak_rss_kb() -> u64 {
             }
             #[cfg(not(target_os = "macos"))]
             {
-                return rusage.ru_maxrss; // Linux: already KiB
+                return rusage.ru_maxrss as u64; // Linux: already KiB
             }
         }
     }
@@ -171,7 +171,9 @@ where
             .collect();
         for t in tasks {
             if let Ok(Ok(lat)) = t.await {
-                hist.saturating_record(lat.as_micros() as u64);
+                // `record` (not `saturating_record`): the histogram auto-resizes
+                // beyond its initial +-2 unit range, so real latencies are kept.
+                let _ = hist.record(lat.as_micros() as u64);
                 count += 1;
             }
         }
@@ -286,19 +288,29 @@ pub async fn run_bench(cfg: &BenchConfig) -> anyhow::Result<BenchReport> {
 }
 
 /// Ramp `run_bench` over concurrency 1,2,4,8,cores,cores*2 and keep the
-/// report with the peak throughput. `Ferrite` is initialized once and reused
-/// across ramp points.
+/// report with the peak throughput. Lib targets init `Ferrite` once and reuse
+/// it across ramp points; HTTP targets ingest `n_docs` through `/v1/ingest`
+/// once, then measure a fresh search window per ramp point against the
+/// remote service.
 pub async fn ramp_and_report(cfg: &BenchConfig) -> anyhow::Result<BenchReport> {
-    if let Target::Http(base) = &cfg.target {
-        http_target::http_bench(base, cfg).await?;
-    }
-    let ferrite = prepare_lib(cfg).await?;
+    let (http, ferrite) = match &cfg.target {
+        Target::Http(base) => {
+            let client = http_target::http_client()?;
+            http_target::ingest_over_http(&client, base, cfg).await?;
+            (Some((base.clone(), client)), None)
+        }
+        Target::Lib => (None, Some(prepare_lib(cfg).await?)),
+    };
     let cores = EnvInfo::current().cores;
     let mut best: Option<(f64, Histogram<u64>, u64, usize)> = None;
     for c in [1usize, 2, 4, 8, cores, cores * 2] {
         let c = c.max(1);
         let run_cfg = cfg.with_concurrency(c);
-        let (hist, count) = run_once(&ferrite, &run_cfg).await?;
+        let (hist, count) = match (&http, &ferrite) {
+            (Some((base, client)), _) => http_target::http_run_once(client, base, &run_cfg).await?,
+            (None, Some(f)) => run_once(f, &run_cfg).await?,
+            (None, None) => unreachable!("either an HTTP base URL or a lib Ferrite is prepared"),
+        };
         let rps = count as f64 / run_cfg.window_secs.max(1) as f64;
         if best.as_ref().is_none_or(|(best_rps, ..)| rps > *best_rps) {
             best = Some((rps, hist, count, c));
@@ -369,5 +381,16 @@ mod tests {
     #[test]
     fn peak_rss_is_positive() {
         assert!(peak_rss_kb() > 0);
+    }
+
+    #[test]
+    fn records_real_microsecond_latencies() {
+        let mut h = Histogram::<u64>::new(3).unwrap();
+        for v in 7000u64..8500 {
+            let _ = h.record(v);
+        }
+        assert!(h.value_at_quantile(0.50) > 7000);
+        assert!(h.value_at_quantile(0.50) < 8500);
+        assert!(h.min() > 6000, "no values clamped to the initial range");
     }
 }
