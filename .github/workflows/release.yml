@@ -23,6 +23,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --features bench --all-targets -- -D warnings
       - run: cargo test --features bench
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
 
   build:
     needs: check
