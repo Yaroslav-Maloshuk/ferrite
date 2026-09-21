@@ -1,6 +1,10 @@
+use std::path::{Path, PathBuf};
+
 use candle_core::{Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config as BertConfig, DTYPE};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 use crate::config::FerriteConfig;
@@ -9,11 +13,111 @@ use crate::pooling::{l2_normalize, mask_mean_pool};
 
 pub const MODEL_MAX_LENGTH: usize = 256;
 const FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
+const MANIFEST_FILE: &str = ".manifest.json";
 
+/// Per-file SHA-256 manifest written by `download_model`/`ferrite prefetch`.
+/// Presence + a matching hash for every file means the cached model is trusted
+/// and the network is never touched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelManifest {
+    pub repo: String,
+    pub revision: String,
+    pub files: Vec<(String, String)>,
+}
+
+fn sha256_hex(path: &Path) -> Result<String, FerriteError> {
+    let bytes = std::fs::read(path)?;
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+fn manifest_path(dir: &Path) -> PathBuf {
+    dir.join(MANIFEST_FILE)
+}
+
+fn hashed_files(dir: &Path) -> Result<Vec<(String, String)>, FerriteError> {
+    FILES
+        .iter()
+        .map(|f| {
+            let hash = sha256_hex(&dir.join(f))?;
+            Ok((f.to_string(), hash))
+        })
+        .collect()
+}
+
+fn load_manifest(dir: &Path) -> Result<ModelManifest, FerriteError> {
+    let text = std::fs::read_to_string(manifest_path(dir))?;
+    serde_json::from_str(&text).map_err(|e| FerriteError::Model(format!("bad manifest: {e}")))
+}
+
+fn write_manifest(config: &FerriteConfig) -> Result<(), FerriteError> {
+    let manifest = ModelManifest {
+        repo: config.model_repo.clone(),
+        revision: config.model_revision.clone(),
+        files: hashed_files(&config.model_dir)?,
+    };
+    let text = serde_json::to_string(&manifest)
+        .map_err(|e| FerriteError::Model(format!("manifest serialize: {e}")))?;
+    std::fs::write(manifest_path(&config.model_dir), text).map_err(FerriteError::Io)?;
+    Ok(())
+}
+
+fn verify_manifest(dir: &Path) -> Result<(), FerriteError> {
+    let manifest = load_manifest(dir)?;
+    let expect: Vec<(String, String)> = manifest
+        .files
+        .iter()
+        .filter(|(f, _)| FILES.contains(&f.as_str()))
+        .cloned()
+        .collect();
+    if expect.len() != FILES.len() {
+        return Err(FerriteError::Model(
+            "manifest does not cover all model files".into(),
+        ));
+    }
+    for (file, expected) in &expect {
+        let actual = sha256_hex(&dir.join(file))?;
+        if &actual != expected {
+            return Err(FerriteError::Model(format!(
+                "integrity check failed for {file} ({actual} != {expected}); \
+                 model may be tampered or corrupt"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn files_present(dir: &Path) -> bool {
+    FILES.iter().all(|f| dir.join(f).is_file())
+}
+
+/// Fetch the model into `FERRITE_MODEL_DIR` (idempotent). When every file is
+/// present and the per-file SHA-256 manifest matches, a *no-op that never
+/// touches the network* — this is the air-gapped entry point. If
+/// `FERRITE_MODEL_SHA256` is set, `model.safetensors` is also pinned to that
+/// exact hash and mismatches fail loudly.
 pub fn download_model(config: &FerriteConfig) -> Result<(), FerriteError> {
     let dir = &config.model_dir;
-    if FILES.iter().all(|f| dir.join(f).is_file()) {
-        return Ok(());
+    if files_present(dir) {
+        let pinned = config
+            .model_sha256
+            .as_ref()
+            .map(|expected| {
+                sha256_hex(&dir.join("model.safetensors")).map(|a| a.eq_ignore_ascii_case(expected))
+            })
+            .transpose()?;
+        if pinned == Some(false) {
+            return Err(FerriteError::Model(
+                "model.safetensors does not match FERRITE_MODEL_SHA256".into(),
+            ));
+        }
+        return match manifest_path(dir).is_file() {
+            true => verify_manifest(dir),
+            // Legacy cache side without a manifest: stamp it, then trust.
+            false => write_manifest(config),
+        };
+    }
+    if config.model_sha256.is_none() {
+        tracing::warn!("FERRITE_MODEL_SHA256 unset: model integrity is not pinned");
     }
     std::fs::create_dir_all(dir).map_err(FerriteError::Io)?;
     let client = hf_hub::HFClientSync::new().map_err(|e| FerriteError::Model(e.to_string()))?;
@@ -28,8 +132,16 @@ pub fn download_model(config: &FerriteConfig) -> Result<(), FerriteError> {
             .map_err(|e| FerriteError::Model(e.to_string()))?;
         let dst = dir.join(f);
         std::fs::copy(&src, &dst).map_err(FerriteError::Io)?;
+        if f == "model.safetensors"
+            && let Some(expected) = &config.model_sha256
+            && !sha256_hex(&dst)?.eq_ignore_ascii_case(expected)
+        {
+            return Err(FerriteError::Model(
+                "downloaded model.safetensors does not match FERRITE_MODEL_SHA256".into(),
+            ));
+        }
     }
-    Ok(())
+    write_manifest(config)
 }
 
 pub struct Embedder {
@@ -191,5 +303,57 @@ mod tests {
         let embedder = Embedder::load(&cfg()).unwrap();
         let out = embedder.embed(&[]).unwrap();
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn manifest_roundtrip_verifies_and_detects_tampering() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        for f in FILES {
+            std::fs::write(dir.join(f), f.as_bytes()).unwrap();
+        }
+        let config = FerriteConfig {
+            model_dir: dir.to_path_buf(),
+            model_repo: "r/o".into(),
+            model_revision: "rev".into(),
+            ..Default::default()
+        };
+        write_manifest(&config).unwrap();
+        assert!(manifest_path(dir).is_file());
+        verify_manifest(dir).unwrap();
+
+        std::fs::write(dir.join("model.safetensors"), "tampered").unwrap();
+        let err = verify_manifest(dir).unwrap_err();
+        assert!(err.to_string().contains("integrity check failed"), "{err}");
+    }
+
+    #[test]
+    fn pinned_sha256_rejects_mismatch_without_network() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        for f in FILES {
+            std::fs::write(dir.join(f), f.as_bytes()).unwrap();
+        }
+        let config = FerriteConfig {
+            model_dir: dir.to_path_buf(),
+            model_sha256: Some("deadbeef".into()),
+            ..Default::default()
+        };
+        // files are present, so the offline verify path runs: pinned hash differs
+        let err = download_model(&config).unwrap_err();
+        assert!(err.to_string().contains("does not match"), "{err}");
+
+        // matching pin also fails verification when no manifest exists for a
+        // fresh dir whose pinned value is correct but files were "tampered"?
+        // no — matching pin plus no manifest stamps it; use wrong hash above.
+        let config = FerriteConfig {
+            model_dir: dir.to_path_buf(),
+            model_sha256: {
+                let bytes = std::fs::read(dir.join("model.safetensors")).unwrap();
+                Some(format!("{:x}", Sha256::digest(&bytes)))
+            },
+            ..Default::default()
+        };
+        assert!(download_model(&config).is_ok());
     }
 }

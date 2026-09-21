@@ -5,8 +5,9 @@ services:
       dockerfile: docker/ferrite.Dockerfile
     ports: ["8080:8080"]
     volumes: ["./data:/data"]
-    environment:
-      FERRITE_MODEL_DIR: /data/models
+    # Model is baked into the image (air-gapped, HF_HUB_OFFLINE=1).
+    # Optional: set FERRITE_API_KEY here to require a bearer key; the bench
+    # service then also needs the same key via its own FERRITE_API_KEY.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/v1/health"]
       interval: 3s
@@ -42,6 +43,8 @@ services:
       ferrite-bench compare --ours /data/reports/ferrite.json --baseline /data/reports/baseline.json --out /data/reports/comparison.json &&
       ferrite-bench table --comparison /data/reports/comparison.json
       "
+    # If ferrite runs with FERRITE_API_KEY, set the same value here so the
+    # bench client authenticates: FERRITE_API_KEY: ${FERRITE_API_KEY:-}
     volumes: ["./data:/data"]
     depends_on:
       ferrite:

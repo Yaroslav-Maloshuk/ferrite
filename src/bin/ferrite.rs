@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -61,11 +62,33 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Serve { port } => {
             config.port = port;
+            if config.tls_cert.is_some() != config.tls_key.is_some() {
+                anyhow::bail!("FERRITE_TLS_CERT and FERRITE_TLS_KEY must be set together");
+            }
+            if config.api_key.is_some() {
+                tracing::info!("API-key auth enabled (all routes except /v1/health)");
+            }
             let ferrite = Arc::new(Ferrite::init(&config).await?);
-            let app = router(ferrite);
-            let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-            tracing::info!("ferrite listening on :{port}");
-            axum::serve(listener, app).await?;
+            let app = router(ferrite, config.api_key.clone())
+                .into_make_service_with_connect_info::<SocketAddr>();
+            let addr = SocketAddr::from(([0, 0, 0, 0], port));
+            match (&config.tls_cert, &config.tls_key) {
+                (Some(cert), Some(key)) => {
+                    tracing::info!("ferrite listening on :{port} (TLS)");
+                    rustls::crypto::ring::default_provider()
+                        .install_default()
+                        .ok();
+                    let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+                        .await
+                        .map_err(anyhow::Error::new)?;
+                    axum_server::bind_rustls(addr, tls).serve(app).await?;
+                }
+                (None, None) => {
+                    tracing::info!("ferrite listening on :{port}");
+                    axum_server::bind(addr).serve(app).await?;
+                }
+                _ => unreachable!("tls pair checked above"),
+            }
         }
         Command::Ingest { file, limit } => {
             let ferrite = Ferrite::init(&config).await?;

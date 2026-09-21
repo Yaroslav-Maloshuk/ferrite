@@ -5,6 +5,7 @@ edition = "2024"
 description = "Rust-native embedding (Candle) + retrieval (LanceDB) pipeline"
 license = "MIT"
 rust-version = "1.98"
+exclude = ["docs/superpowers/**", "docs/sales/**", "COMMERCIAL_OFFER.md"]
 
 [lib]
 name = "ferrite"
@@ -31,6 +32,8 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util"] }
 axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+rustls = { version = "0.23", features = ["ring"] }
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -40,6 +43,7 @@ candle-nn = "0.11.0"
 candle-transformers = "0.11.0"
 tokenizers = "0.23"
 hf-hub = { version = "1.0.0", features = ["blocking"] }
+sha2 = "0.10"
 lancedb = { version = "0.38.0", features = ["remote"] }
 arrow-array = "58.0.0"
 arrow-schema = "58.0.0"
@@ -51,7 +55,16 @@ reqwest = { version = "0.12", features = ["json", "http2"] }
 futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"
