@@ -73,11 +73,39 @@ The `ferrite` binary (needs `--features bench` for the bench binary):
 | --- | --- | --- |
 | `FERRITE_DATA_DIR` | `data` | Data root (reports, JSONL datasets) |
 | `FERRITE_MODEL_DIR` | `data/models` | Where the embedding model is cached |
+| `FERRITE_MODEL_REPO` | `sentence-transformers/all-MiniLM-L6-v2` | HuggingFace repo to download when the cache is cold |
+| `FERRITE_MODEL_REVISION` | `refs/pr/21` | Revision of `FERRITE_MODEL_REPO` to download |
+| `FERRITE_MODEL_SHA256` | (unset) | Pin `model.safetensors` to this SHA-256; every load fails loudly on mismatch (air-gapped integrity) |
 | `FERRITE_LANCE_URI` | `data/lance` | LanceDB table URI |
 | `FERRITE_PORT` | `8080` | HTTP port |
 | `FERRITE_INDEX` | `flat` | `flat` or `ivf_pq` |
+| `FERRITE_IVF_PARTITIONS` | `16` | IVF partitions for `ivf_pq` index |
 | `FERRITE_TOP_K` | `10` | Default `top_k` for search |
 | `FERRITE_BATCH_SIZE` | `32` | Model inference batch size |
+| `FERRITE_MAX_TEXT_BATCH` | `256` | Max texts per embed/ingest call |
+| `FERRITE_API_KEY` | (unset) | Require this bearer key on every route except `/v1/health` |
+| `FERRITE_TLS_CERT` / `FERRITE_TLS_KEY` | (unset) | PEM cert/key paths; serving switches to HTTPS when both are set |
+| `HF_HOME` | `~/.cache/huggingface` | hf-hub cache root for model downloads (native, not Ferrite-specific) |
+| `HF_HUB_OFFLINE` | (unset) | Set `1` to force offline mode (hf-hub refuses network) |
+
+## Enterprise / air-gapped mode
+
+- **Offline model:** `ferrite prefetch` downloads once and writes
+  `data/models/.manifest.json` (per-file SHA-256). Every later
+  load (*including `serve`*) re-verifies the hashes and **touches no
+  network**. With `FERRITE_MODEL_SHA256` set, `model.safetensors` is pinned
+  to that exact hash and mismatches abort startup — the integrity hook a
+  security review will ask for. The Docker image bakes the model and runs with
+  `HF_HUB_OFFLINE=1`.
+- **Auth:** set `FERRITE_API_KEY` and send `Authorization: Bearer <key>` (or
+  `X-API-Key: <key>`) on every route; `/v1/health` stays public for
+  healthchecks. Keys are compared in constant time. `ferrite-bench` picks up
+  the same key via its own `FERRITE_API_KEY` environment variable.
+- **TLS:** set `FERRITE_TLS_CERT`/`FERRITE_TLS_KEY` (PEM) to serve HTTPS
+  natively (rustls), no reverse proxy required.
+- **Audit:** every request is logged with
+  `method, uri, status, latency_ms, remote_ip, authed` at INFO level
+  (`ferrite::http` target), giving a per-request audit trail for compliance.
 
 ## Tests
 
@@ -92,9 +120,15 @@ cargo fmt --check
 Methodology: a deterministic 25,000-question sample is drawn from the Quora
 duplicates dataset (seed 42) and written to `quora_questions.jsonl`. The harness
 ingests the first 5,000 documents through each service's HTTP ingest path, then
-ramps concurrency `1, 2, 4, 8, cores, cores*2` over 10-second fixed windows of
-1,000 probe queries (`top_k=10`), keeping the peak-throughput report. No tuning
-or warmup separation: probes run while the service is under load.
+ramps concurrency over 10-second fixed windows of 1,000 probe queries
+(`top_k=10`) at 1, 2, 4, 8, ... (capped at `cores*2`), stopping at the first
+run whose P99 breaches `P99@concurrency=1 × p99_saturation_factor` (default
+`2.0`, flag `--p99-saturation-factor`), and keeping the peak-throughput report.
+No tuning or warmup separation: probes run while the service is under load.
+
+Search scores are cosine similarity (`distance = 1 - score`), matching the
+Chroma baseline's `hnsw:space: cosine`, so result values are directly
+comparable between the two services.
 
 Environment: macOS (Apple Silicon, 14 cores), native processes, Candle CPU path
 (no `accelerate`), release build (`rust-version` 1.98, `lto=thin`).
@@ -102,27 +136,54 @@ Environment: macOS (Apple Silicon, 14 cores), native processes, Candle CPU path
 ```
 | Metric | Ferrite | Python/LangChain | Speedup |
 | --- | --- | --- | --- |
-| P50 (ms) | 47.9 | 159.4 | 3.3x |
-| P99 (ms) | 62.2 | 235.0 | 3.8x |
-| P99.9 (ms) | 68.4 | 237.2 | 3.5x |
-| Throughput RPS | 247.8 | 170.8 | 1.5x |
-| RPS/core | 17.7 | 12.2 | 1.5x |
-| Peak RSS (MB) | 20.0 | 21.0 | 1.1x |
+| P50 (ms) | 17.5 | 14.5 | 0.8x |
+| P99 (ms) | 25.6 | 16.0 | 0.6x |
+| P99.9 (ms) | 32.7 | 16.1 | 0.5x |
+| Throughput RPS | 196.0 | 138.0 | 1.4x |
+| RPS/core | 14.0 | 9.9 | 1.4x |
+| Peak RSS (MB) | 275.0 | 696.0 | 2.5x |
 FERRITE_ENV: os=macos cores=14 rust=0.1.0 container=false
 BASELINE_ENV: os=macos cores=14 rust=0.1.0 container=false
+RSS_PROCESS: ferrite=pid:17694 baseline=pid:17695
 ```
 
-Reproduce with `docs/benchmarks/benchmark-run-howto.md`. The same workload in
-Docker (4-vCPU Linux containers: `cores=4 container=true`) measured Ferrite
-p50 = 38.5 ms / 196 RPS vs baseline p50 = 40.1 ms / 183.2 RPS — with equally
-shaped containers the gap squeezes and per-core throughput (`rps/core`
-49.0 vs 45.8) is the cleaner signal.
+Each service is measured at its own peak-throughput concurrency under the P99
+saturation gate — ferrite peaked at `c=4`, the baseline at `c=2` (both breach
+2x unloaded P99 at higher concurrency) — so the latency columns are not
+directly comparable across services; throughput and RSS are the apples-to-apples
+read. `peak_rss_mb` is the service process's own measured peak
+(`RSS_PROCESS` shows the sampled pid / `self` for the in-process lib run).
+
+Reproduce with `docs/benchmarks/benchmark-run-howto.md`. A Docker run (4-vCPU
+Linux containers: `cores=4 container=true`) measured Ferrite p50 = 41.6 ms /
+181.6 RPS vs baseline p50 = 40.2 ms / 182.4 RPS — both peeked at `c=8` under
+the same saturation ramp, so the columns are comparable there, and the gap
+squeezes to parity (`rps/core` 45.4 vs 45.6; container CPU contention caps
+both). In Docker, `peak_rss_mb` reports the bench harness process (cross-
+container `--target-pid` is unavailable); use `docker stats` for service RSS.
 
 Notes:
-- `peak_rss_mb` is the benchmark harness process, not the server.
+- `peak_rss_mb` describes whichever process the `rss_process` field names. For
+  HTTP targets the harness only reports its own RSS unless you pass
+  `--target-pid <server-pid>`; then it reports the server's. Lib-target runs
+  measure themselves (`self`). The table above was re-measured with
+  `--target-pid`, so its RSS rows are the services' own measured peaks.
 - Enabling `--features accelerate` (`candle-core/accelerate`, Apple
   Accelerate BLAS) can lower embedding latency on macOS; the numbers above are
   the baseline CPU build.
+
+## Platforms
+
+- Linux (x86_64/aarch64, glibc) — the Docker image and compose stack target this.
+- macOS (Apple Silicon and Intel) — native; Apple Accelerate BLAS via
+  `--features accelerate`.
+- Windows (x86_64) — native MSVC toolchain; Docker is Linux-only.
+
+Inference is CPU-only on every platform (`Device::Cpu`); there is no GPU/Metal
+backend. `peak_rss_mb` uses a true per-process high-water mark on Linux
+(`VmHWM`) and Windows (`PeakWorkingSetSize`); on macOS a *different* process is
+sampled for its current RSS via `ps` (a lower bound), while the calling process
+uses `getrusage`.
 
 ## Repository layout
 
