@@ -120,6 +120,30 @@ pub fn download_model(config: &FerriteConfig) -> Result<(), FerriteError> {
         tracing::warn!("FERRITE_MODEL_SHA256 unset: model integrity is not pinned");
     }
     std::fs::create_dir_all(dir).map_err(FerriteError::Io)?;
+    let mut last_err = String::new();
+    for attempt in 1..=DOWNLOAD_MAX_ATTEMPTS {
+        match download_all_files(config, dir) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = e.to_string();
+                tracing::warn!(
+                    "model download attempt {attempt}/{} failed: {last_err}; clearing cache and retrying",
+                    DOWNLOAD_MAX_ATTEMPTS
+                );
+                for f in FILES {
+                    let _ = std::fs::remove_file(dir.join(f));
+                }
+            }
+        }
+    }
+    Err(FerriteError::Model(format!(
+        "model download failed after {DOWNLOAD_MAX_ATTEMPTS} attempts: {last_err}"
+    )))
+}
+
+const DOWNLOAD_MAX_ATTEMPTS: usize = 3;
+
+fn download_all_files(config: &FerriteConfig, dir: &Path) -> Result<(), FerriteError> {
     let client = hf_hub::HFClientSync::new().map_err(|e| FerriteError::Model(e.to_string()))?;
     let (owner, name) = hf_hub::split_id(&config.model_repo);
     let repo = client.model(owner, name);
@@ -141,7 +165,8 @@ pub fn download_model(config: &FerriteConfig) -> Result<(), FerriteError> {
             ));
         }
     }
-    write_manifest(config)
+    write_manifest(config)?;
+    verify_manifest(dir)
 }
 
 pub struct Embedder {
