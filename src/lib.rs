@@ -5,6 +5,7 @@ pub mod http;
 pub mod pipeline;
 pub mod pooling;
 pub mod store;
+pub mod sys;
 
 pub use config::{FerriteConfig, IndexMode};
 pub use error::FerriteError;

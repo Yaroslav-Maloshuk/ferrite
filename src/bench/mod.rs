@@ -52,6 +52,10 @@ pub struct Params {
     pub window_secs: u64,
 }
 
+fn default_rss_process() -> String {
+    "unknown".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metrics {
     pub p50_ms: f64,
@@ -60,6 +64,11 @@ pub struct Metrics {
     pub rps: f64,
     pub rps_per_core: f64,
     pub peak_rss_mb: u64,
+    /// Which process `peak_rss_mb` describes: `self` (lib target),
+    /// `pid:<n>` (an HTTP server's PID), or `harness` (HTTP target with no
+    /// `--target-pid`, i.e. the harness process itself).
+    #[serde(default = "default_rss_process")]
+    pub rss_process: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,38 +79,7 @@ pub struct BenchReport {
     pub metrics: Metrics,
 }
 
-/// VmHWM (Linux) or getrusage ru_maxrss (macOS), in KiB.
-pub fn peak_rss_kb() -> u64 {
-    if let Ok(stat) = std::fs::read_to_string("/proc/self/status") {
-        for line in stat.lines() {
-            if let Some(rest) = line.strip_prefix("VmHWM:") {
-                let kb: u64 = rest
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("0")
-                    .parse()
-                    .unwrap_or(0);
-                return kb;
-            }
-        }
-    }
-    #[cfg(unix)]
-    {
-        let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
-        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut rusage) };
-        if rc == 0 {
-            #[cfg(target_os = "macos")]
-            {
-                return (rusage.ru_maxrss / 1024) as u64; // bytes -> KiB
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                return rusage.ru_maxrss as u64; // Linux: already KiB
-            }
-        }
-    }
-    0
-}
+pub use crate::sys::{peak_rss_kb, process_peak_rss_kb};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Target {
@@ -120,7 +98,29 @@ pub struct BenchConfig {
     pub top_k: usize,
     pub dataset: PathBuf,
     pub out: PathBuf,
+    /// PID of the HTTP target service, used to report *its* `peak_rss_mb`.
+    /// Ignored for the lib target (which measures itself).
+    pub target_pid: Option<u32>,
+    /// Ramp stops when P99 exceeds `p99_at_concurrency_1 * p99_saturation_factor`.
+    pub p99_saturation_factor: f64,
     pub ferrite_config: FerriteConfig,
+}
+
+/// Ramp concurrency: 1, 2, 4, 8, ... capped at `cores * 2`, keeping the
+/// largest power-of-two run within that cap (avoiding duplicates on non-power
+/// of-two core counts).
+fn ramp_points(cores: usize) -> Vec<usize> {
+    let max = (cores * 2).max(1);
+    let mut points = Vec::new();
+    let mut c = 1usize;
+    while c <= max {
+        points.push(c);
+        c = c.saturating_mul(2);
+    }
+    if points.last().copied() != Some(max) {
+        points.push(max);
+    }
+    points
 }
 
 impl BenchConfig {
@@ -269,13 +269,21 @@ fn build_report(
     let (p50, p99, p999) = ms(&hist);
     let rps = count as f64 / cfg.window_secs.max(1) as f64;
     let env = EnvInfo::current();
+    let (rss_kb, rss_process) = match &cfg.target {
+        Target::Lib => (peak_rss_kb(), "self".to_string()),
+        Target::Http(_) => match cfg.target_pid {
+            Some(pid) => (process_peak_rss_kb(pid), format!("pid:{pid}")),
+            None => (peak_rss_kb(), "harness".to_string()),
+        },
+    };
     let metrics = Metrics {
         p50_ms: p50,
         p99_ms: p99,
         p999_ms: p999,
         rps,
         rps_per_core: rps / env.cores.max(1) as f64,
-        peak_rss_mb: peak_rss_kb() / 1024,
+        peak_rss_mb: rss_kb / 1024,
+        rss_process,
     };
     let report = BenchReport {
         label: cfg.label.clone(),
@@ -306,11 +314,12 @@ pub async fn run_bench(cfg: &BenchConfig) -> anyhow::Result<BenchReport> {
     build_report(cfg, hist, count, cfg.concurrency)
 }
 
-/// Ramp `run_bench` over concurrency 1,2,4,8,cores,cores*2 and keep the
-/// report with the peak throughput. Lib targets init `Ferrite` once and reuse
-/// it across ramp points; HTTP targets ingest `n_docs` through `/v1/ingest`
-/// once, then measure a fresh search window per ramp point against the
-/// remote service.
+/// Ramp over concurrency 1, 2, 4, 8, ... (capped at `cores * 2`), stopping as
+/// soon as a run's P99 breaches `P99@concurrency=1 * p99_saturation_factor`, and
+/// keeping the report with the peak throughput among the accepted runs. Lib
+/// targets init `Ferrite` once and reuse it across ramp points; HTTP targets
+/// ingest `n_docs` through `/v1/ingest` once, then measure a fresh search
+/// window per ramp point against the remote service.
 pub async fn ramp_and_report(cfg: &BenchConfig) -> anyhow::Result<BenchReport> {
     let (http, ferrite) = match &cfg.target {
         Target::Http(base) => {
@@ -320,16 +329,26 @@ pub async fn ramp_and_report(cfg: &BenchConfig) -> anyhow::Result<BenchReport> {
         }
         Target::Lib => (None, Some(prepare_lib(cfg).await?)),
     };
-    let cores = EnvInfo::current().cores;
+    let factor = cfg.p99_saturation_factor.max(1.0);
     let mut best: Option<(f64, Histogram<u64>, u64, usize)> = None;
-    for c in [1usize, 2, 4, 8, cores, cores * 2] {
-        let c = c.max(1);
+    let mut p99_threshold: Option<f64> = None;
+    for c in ramp_points(EnvInfo::current().cores) {
         let run_cfg = cfg.with_concurrency(c);
         let (hist, count) = match (&http, &ferrite) {
             (Some((base, client)), _) => http_target::http_run_once(client, base, &run_cfg).await?,
             (None, Some(f)) => run_once(f, &run_cfg).await?,
             (None, None) => unreachable!("either an HTTP base URL or a lib Ferrite is prepared"),
         };
+        let p99_ms = hist.value_at_quantile(0.99) as f64 / 1000.0;
+        match p99_threshold {
+            // First ramp point (concurrency 1) anchors the saturation threshold.
+            None => p99_threshold = Some(p99_ms * factor),
+            Some(threshold) => {
+                if p99_ms > threshold {
+                    break;
+                }
+            }
+        }
         let rps = count as f64 / run_cfg.window_secs.max(1) as f64;
         if best.as_ref().is_none_or(|(best_rps, ..)| rps > *best_rps) {
             best = Some((rps, hist, count, c));
@@ -368,6 +387,8 @@ mod bench_runner_test {
             top_k: 2,
             dataset: dataset.clone(),
             out: out.clone(),
+            target_pid: None,
+            p99_saturation_factor: 2.0,
             ferrite_config: config,
         };
         let report = run_bench(&cfg).await.unwrap();
@@ -403,6 +424,8 @@ mod bench_runner_test {
             top_k: 2,
             dataset: dataset.clone(),
             out: tmp.path().join("report.json"),
+            target_pid: None,
+            p99_saturation_factor: 2.0,
             ferrite_config: config,
         };
         let report = run_bench(&cfg).await.unwrap();
@@ -413,8 +436,14 @@ mod bench_runner_test {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use hdrhistogram::Histogram;
+
+    #[test]
+    fn ramp_points_doubles_and_caps() {
+        assert_eq!(super::ramp_points(1), vec![1, 2]);
+        assert_eq!(super::ramp_points(8), vec![1, 2, 4, 8, 16]);
+        assert_eq!(super::ramp_points(14), vec![1, 2, 4, 8, 16, 28]);
+    }
 
     #[test]
     fn histogram_percentiles() {
@@ -425,11 +454,6 @@ mod tests {
         assert_eq!(h.value_at_quantile(0.50), 499);
         assert_eq!(h.value_at_quantile(0.99), 989);
         assert_eq!(h.value_at_quantile(0.999), 998);
-    }
-
-    #[test]
-    fn peak_rss_is_positive() {
-        assert!(peak_rss_kb() > 0);
     }
 
     #[test]

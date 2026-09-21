@@ -16,9 +16,22 @@ use serde_json::json;
 use super::{BenchConfig, INGEST_BATCH, load_questions, measure_window};
 use crate::pipeline::IngestItem;
 
-/// Shared `reqwest` client for HTTP-mode benchmarks.
+/// Shared `reqwest` client for HTTP-mode benchmarks. If `FERRITE_API_KEY` is set
+/// (e.g. the target service runs with authentication), every request carries
+/// `Authorization: Bearer <key>`.
 pub(crate) fn http_client() -> anyhow::Result<Client> {
-    Ok(Client::builder().user_agent("ferrite-bench").build()?)
+    let mut builder = Client::builder().user_agent("ferrite-bench");
+    if let Ok(key) = std::env::var("FERRITE_API_KEY")
+        && !key.is_empty()
+    {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))?,
+        );
+        builder = builder.default_headers(headers);
+    }
+    Ok(builder.build()?)
 }
 
 /// POST the first `cfg.n_docs` dataset lines to `/v1/ingest`, requiring 2xx on
@@ -164,6 +177,8 @@ mod tests {
             top_k: 2,
             dataset: write_dataset(tmp),
             out,
+            target_pid: None,
+            p99_saturation_factor: 2.0,
             ferrite_config: ferrite_config.clone(),
         };
         (cfg, ferrite_config)
@@ -181,7 +196,7 @@ mod tests {
             ..Default::default()
         };
         let ferrite = Arc::new(Ferrite::init(&ferrite_config).await.unwrap());
-        let app = router(ferrite);
+        let app = router(ferrite, None);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();

@@ -39,7 +39,9 @@ impl Ferrite {
         .await
         .map_err(|e| FerriteError::Other(format!("embedder task: {e}")))??;
         let store = VectorStore::open(&config).await?;
-        store.create_index(config.index).await?;
+        store
+            .create_index(config.index, config.ivf_partitions)
+            .await?;
         Ok(Self {
             embedder: Arc::new(embedder),
             store: Arc::new(store),

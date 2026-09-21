@@ -31,6 +31,10 @@ enum Command {
         label: String,
         #[arg(long)]
         target_http: Option<String>,
+        /// PID of the HTTP target service; reports its `peak_rss_mb` instead of
+        /// the harness process (ignored for the lib target).
+        #[arg(long)]
+        target_pid: Option<u32>,
         #[arg(long, default_value_t = 1)]
         concurrency: usize,
         #[arg(long, default_value_t = 10)]
@@ -47,6 +51,10 @@ enum Command {
         out: PathBuf,
         #[arg(long)]
         ramp: bool,
+        /// Stop the ramp once P99 exceeds `P99@concurrency=1 * FACTOR`;
+        /// `1` disables early stopping (run every ramp point).
+        #[arg(long, default_value_t = 2.0)]
+        p99_saturation_factor: f64,
     },
     /// Compare two benchmark reports and emit a comparison JSON.
     Compare {
@@ -74,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Run {
             label,
             target_http,
+            target_pid,
             concurrency,
             window_secs,
             n_docs,
@@ -82,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
             dataset,
             out,
             ramp,
+            p99_saturation_factor,
         } => {
             let target = match target_http {
                 Some(base) => Target::Http(base),
@@ -97,6 +107,8 @@ async fn main() -> anyhow::Result<()> {
                 top_k,
                 dataset,
                 out,
+                target_pid,
+                p99_saturation_factor,
                 ferrite_config: FerriteConfig::from_env(),
             };
             let report = if ramp {

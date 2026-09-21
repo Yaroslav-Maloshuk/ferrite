@@ -9,7 +9,22 @@ pub struct MetricPair {
     pub speedup: f64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RssProcess {
+    pub ferrite: String,
+    pub baseline: String,
+}
+
+impl Default for RssProcess {
+    fn default() -> Self {
+        Self {
+            ferrite: "unknown".into(),
+            baseline: "unknown".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Comparison {
     pub p50_ms: MetricPair,
     pub p99_ms: MetricPair,
@@ -17,6 +32,8 @@ pub struct Comparison {
     pub rps: MetricPair,
     pub rps_per_core: MetricPair,
     pub peak_rss_mb: MetricPair,
+    #[serde(default)]
+    pub rss_process: RssProcess,
 }
 
 /// Speedup for a lower-is-better metric (latency, RSS): baseline/ferrite.
@@ -57,6 +74,10 @@ pub fn compare(ours: &BenchReport, baseline: &BenchReport) -> Comparison {
         rps: pair(o.rps, b.rps, &throughput_speedup),
         rps_per_core: pair(o.rps_per_core, b.rps_per_core, &throughput_speedup),
         peak_rss_mb: pair(o.peak_rss_mb as f64, b.peak_rss_mb as f64, &latency_speedup),
+        rss_process: RssProcess {
+            ferrite: ours.metrics.rss_process.clone(),
+            baseline: baseline.metrics.rss_process.clone(),
+        },
     }
 }
 
@@ -89,6 +110,10 @@ pub fn render_table(c: &Comparison, baseline_env: &EnvInfo, ferrite_env: &EnvInf
         "BASELINE_ENV: os={} cores={} rust={} container={}\n",
         baseline_env.os, baseline_env.cores, baseline_env.rust, baseline_env.container
     ));
+    s.push_str(&format!(
+        "RSS_PROCESS: ferrite={} baseline={}\n",
+        c.rss_process.ferrite, c.rss_process.baseline
+    ));
     s
 }
 
@@ -115,6 +140,7 @@ mod compare_tests {
                 rps,
                 rps_per_core: rps,
                 peak_rss_mb: rss,
+                rss_process: "self".into(),
             },
         }
     }
@@ -138,5 +164,6 @@ mod compare_tests {
         assert!(t.contains("Metric"));
         assert!(t.contains("2.0x"));
         assert!(t.contains("Ferrite"));
+        assert!(t.contains("RSS_PROCESS"));
     }
 }

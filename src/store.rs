@@ -3,6 +3,7 @@ use std::sync::Arc;
 use arrow_array::{FixedSizeListArray, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use futures::TryStreamExt;
+use lancedb::DistanceType;
 use lancedb::connect;
 use lancedb::index::{Index, vector::IvfPqIndexBuilder};
 use lancedb::query::{ExecutableQuery, QueryBase};
@@ -119,6 +120,9 @@ impl VectorStore {
             .limit(k)
             .nearest_to(query_vec.to_vec())
             .map_err(|e| FerriteError::Database(e.to_string()))?
+            // Cosine distance (1 - cosine similarity), matching the Chroma
+            // baseline's `hnsw:space: cosine`, so `score` is cosine similarity.
+            .distance_type(DistanceType::Cosine)
             .execute()
             .await
             .map_err(|e| FerriteError::Database(e.to_string()))?;
@@ -164,11 +168,18 @@ impl VectorStore {
             .map_err(|e| FerriteError::Database(e.to_string()))
     }
 
-    pub async fn create_index(&self, mode: IndexMode) -> Result<(), FerriteError> {
+    pub async fn create_index(
+        &self,
+        mode: IndexMode,
+        ivf_partitions: usize,
+    ) -> Result<(), FerriteError> {
         match mode {
             IndexMode::Flat => Ok(()),
             IndexMode::IvfPq => {
-                let builder = IvfPqIndexBuilder::default().num_partitions(16);
+                let builder = IvfPqIndexBuilder::default()
+                    .num_partitions(ivf_partitions as u32)
+                    // Must match the query distance type.
+                    .distance_type(DistanceType::Cosine);
                 self.table
                     .create_index(&["vector"], Index::IvfPq(builder))
                     .execute()
@@ -213,15 +224,23 @@ mod tests {
                 metadata: None,
             },
         ];
-        // embeddings: pretend dim-384 vectors; component 0 encodes identity
-        let embs: Vec<Vec<f32>> = vec![vec50(0.9f32, 384), vec50(0.5f32, 384), vec50(-0.9f32, 384)];
+        // embeddings: distinct unit directions, so cosine distance distinguishes them
+        let embs: Vec<Vec<f32>> = vec![unit_vec(384, 0), unit_vec(384, 1), unit_vec(384, 2)];
         let n = store.add(&items, &embs).await.unwrap();
         assert_eq!(n, 3);
         assert_eq!(store.count().await.unwrap(), 3);
+        // query points mostly along axis 0 -> "a" should win
         let hits = store.search(&vec50(0.88f32, 384), 3).await.unwrap();
         assert_eq!(hits[0].id, "a");
         assert_eq!(hits[0].text, "the cat sits outside");
         assert!(hits[0].distance < hits[1].distance);
+    }
+
+    // helper: unit vector with a single `1.0` at `idx`
+    fn unit_vec(dim: usize, idx: usize) -> Vec<f32> {
+        let mut v = vec![0.0; dim];
+        v[idx] = 1.0;
+        v
     }
 
     // helper: all-`x` vector except index 0 dominated by bias
