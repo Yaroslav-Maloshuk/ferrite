@@ -18,8 +18,16 @@ jobs:
           toolchain: "1.98"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-        if: runner.os == 'Linux'
+      - name: Install protoc
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install protobuf
+          else
+            choco install protobuf -y
+          fi
       - run: cargo fmt --check
       - run: cargo clippy --features bench --all-targets -- -D warnings
       - run: cargo test --features bench
@@ -48,8 +56,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-        if: runner.os == 'Linux'
+      - name: Install protoc
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install protobuf
+          else
+            choco install protobuf -y
+          fi
       - run: cargo build --release --bin ferrite --target ${{ matrix.target }}
       - run: cargo build --release --features bench --bin ferrite-bench --target ${{ matrix.target }}
       - name: Package artifacts
