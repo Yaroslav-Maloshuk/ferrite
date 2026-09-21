@@ -55,6 +55,9 @@ No hours metering, no surprise invoices.
 
 ## Terms (brief)
 
-- Ferrite source stays MIT; this agreement covers our engineering, delivery, and support.
-- Deliverables: Docker image + runbook + benchmark report + 30-day support.
+- Dual-license: MIT source core (`LICENSE`) + Commercial License for covered use
+  (`COMMERCIAL_LICENSE.md`). This agreement covers our engineering, delivery, and support.
+- Prebuilt binaries for macOS (arm64/x86_64), Linux (amd64/arm64), and Windows (x86_64)
+  are produced by the release CI (`.github/workflows/release.yml`).
+- Deliverables: Docker image + binary bundle + runbook + benchmark report + 30-day support.
 - Typical delivery: 1–2 weeks from corpus receipt.
