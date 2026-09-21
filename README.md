@@ -174,10 +174,16 @@ Notes:
 
 ## Platforms
 
-- Linux (x86_64/aarch64, glibc) — the Docker image and compose stack target this.
+- Linux (x86_64/aarch64, glibc) — the Docker image and compose stack target this;
+  both architectures validate (`uname -m` = x86_64 / aarch64).
 - macOS (Apple Silicon and Intel) — native; Apple Accelerate BLAS via
-  `--features accelerate`.
-- Windows (x86_64) — native MSVC toolchain; Docker is Linux-only.
+  `--features accelerate`. x86_64 builds cross-compile from Apple Silicon.
+- Windows (x86_64) — cross-compiled (mingw-w64) and confirmed as PE32+; a native
+  MSVC build runs on `windows-latest` CI. Docker is Linux-only.
+
+All six binaries (macOS arm64/x86_64, Linux amd64/arm64, Windows x86_64) are
+produced by the release CI (`.github/workflows/release.yml`) and tagged via
+`v*` -> GitHub Release.
 
 Inference is CPU-only on every platform (`Device::Cpu`); there is no GPU/Metal
 backend. `peak_rss_mb` uses a true per-process high-water mark on Linux
