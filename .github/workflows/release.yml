@@ -11,6 +11,8 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -35,8 +37,6 @@ jobs:
           FERRITE_MODEL_DIR: data/models
         run: ./target/debug/ferrite prefetch
       - run: cargo test --features bench
-        env:
-          CARGO_PROFILE_DEV_DEBUG: "0"
 
   build:
     needs: check
