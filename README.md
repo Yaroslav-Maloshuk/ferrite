@@ -178,16 +178,14 @@ Notes:
   both architectures validate (`uname -m` = x86_64 / aarch64).
 - macOS (Apple Silicon and Intel) — native; Apple Accelerate BLAS via
   `--features accelerate`. x86_64 builds cross-compile from Apple Silicon.
-- Windows (x86_64) — cross-compiles locally (mingw-w64); not currently shipped
-  in CI releases. Docker is Linux-only.
 
 The release CI (`.github/workflows/release.yml`) builds the tagged (`v*`)
-GitHub Release for the four shipped targets; Windows CI builds were dropped
-after costing more runner-hours than the platform's demand justifies.
+GitHub Release for the four shipped targets (Linux amd64/arm64, macOS
+arm64/x86_64).
 
 Inference is CPU-only on every platform (`Device::Cpu`); there is no GPU/Metal
 backend. `peak_rss_mb` uses a true per-process high-water mark on Linux
-(`VmHWM`) and Windows (`PeakWorkingSetSize`); on macOS a *different* process is
+(`VmHWM`); on macOS a *different* process is
 sampled for its current RSS via `ps` (a lower bound), while the calling process
 uses `getrusage`.
 

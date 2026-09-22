@@ -25,12 +25,6 @@ default = []
 bench = []
 accelerate = ["candle-core/accelerate"]
 
-[patch.crates-io]
-# esaxx-rs build.rs gates its C++ stdlib on the HOST (`cfg(target_os)` instead of
-# the cross target), which sets `-stdlib=libc++` (a clang-only flag) when cross-
-# compiling from macOS to Windows. Vendored fix keys off CARGO_CFG_TARGET_OS.
-esaxx-rs = { path = "vendor/esaxx-rs" }
-
 [dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
@@ -64,13 +58,6 @@ rand = "0.8"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_System_ProcessStatus",
-    "Win32_System_Threading",
-] }
 
 [dev-dependencies]
 tempfile = "3"

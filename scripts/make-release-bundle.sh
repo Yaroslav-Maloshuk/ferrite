@@ -6,7 +6,7 @@ set -euo pipefail
 
 VERSION="${1:-0.1.0}"
 OUT="dist/ferrite-$VERSION"
-mkdir -p "$OUT/bin/macos-arm64" "$OUT/bin/macos-x86_64" "$OUT/bin/windows-x86_64" "$OUT/docs"
+mkdir -p "$OUT/bin/macos-arm64" "$OUT/bin/macos-x86_64" "$OUT/docs"
 
 copy_platform() {
   local plat=$1 ferrite=$2 bench=$3
@@ -17,7 +17,6 @@ copy_platform() {
 
 copy_platform macos-arm64     target/release/ferrite                                     target/release/ferrite-bench
 copy_platform macos-x86_64    target/x86_64-apple-darwin/release/ferrite                 target/x86_64-apple-darwin/release/ferrite-bench
-copy_platform windows-x86_64  target/x86_64-pc-windows-gnu/release/ferrite.exe           target/x86_64-pc-windows-gnu/release/ferrite-bench.exe
 
 for doc in LICENSE COMMERCIAL_LICENSE.md COMMERCIAL_OFFER.md README.md; do
   [ -f "$doc" ] && cp "$doc" "$OUT/docs/"

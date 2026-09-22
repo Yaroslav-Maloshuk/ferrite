@@ -1,11 +1,10 @@
 //! Portable process-memory telemetry.
 //!
 //! [`peak_rss_kb`] reports the calling process's resident-set high-water mark;
-//! [`process_peak_rss_kb`] reports another process's. Linux (`VmHWM`) and
-//! Windows (`PeakWorkingSetSize`) expose a true peak. macOS has no per-process
-//! peak API, so an *external* process is sampled for its current RSS via `ps`
-//! — a lower bound — while the calling process uses `getrusage` (`ru_maxrss`,
-//! a peak).
+//! [`process_peak_rss_kb`] reports another process's. Linux (`VmHWM`) exposes
+//! a true peak. macOS has no per-process peak API, so an *external* process is
+//! sampled for its current RSS via `ps` — a lower bound — while the calling
+//! process uses `getrusage` (`ru_maxrss`, a peak).
 
 /// Linux `VmHWM` for `pid`, in KiB.
 #[cfg(target_os = "linux")]
@@ -29,38 +28,6 @@ fn macos_ps_rss_kb(pid: u32) -> Option<u64> {
     String::from_utf8(out.stdout).ok()?.trim().parse().ok()
 }
 
-/// Peak working set for `pid`, or the calling process when `pid` is `None`,
-/// in KiB.
-#[cfg(windows)]
-fn windows_peak_kb(pid: Option<u32>) -> u64 {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::ProcessStatus::{
-        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
-    };
-    use windows_sys::Win32::System::Threading::{
-        GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-    unsafe {
-        let (handle, owned) = match pid {
-            None => (GetCurrentProcess(), false),
-            Some(pid) => (OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid), true),
-        };
-        if handle.is_null() {
-            return 0;
-        }
-        let mut counters: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
-        counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-        let ok = GetProcessMemoryInfo(handle, &mut counters, counters.cb);
-        if owned {
-            let _ = CloseHandle(handle);
-        }
-        if ok == 0 {
-            return 0;
-        }
-        counters.PeakWorkingSetSize as u64 / 1024
-    }
-}
-
 /// `getrusage(RUSAGE_SELF).ru_maxrss`, normalized to KiB.
 #[cfg(unix)]
 fn unix_self_maxrss_kb() -> u64 {
@@ -80,13 +47,11 @@ fn unix_self_maxrss_kb() -> u64 {
 
 /// Peak resident set of the calling process, in KiB.
 pub fn peak_rss_kb() -> u64 {
-    #[cfg(windows)]
-    let kb = windows_peak_kb(None);
     #[cfg(target_os = "linux")]
     let kb = linux_vmhwm_kb(std::process::id()).unwrap_or_else(unix_self_maxrss_kb);
     #[cfg(all(unix, not(target_os = "linux")))]
     let kb = unix_self_maxrss_kb();
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(unix))]
     let kb = 0;
     kb
 }
@@ -94,15 +59,13 @@ pub fn peak_rss_kb() -> u64 {
 /// Peak resident set of another process, in KiB. Returns 0 if the process is
 /// gone or the platform has no way to read it.
 pub fn process_peak_rss_kb(pid: u32) -> u64 {
-    #[cfg(windows)]
-    let kb = windows_peak_kb(Some(pid));
     #[cfg(target_os = "linux")]
     let kb = linux_vmhwm_kb(pid).unwrap_or(0);
     #[cfg(target_os = "macos")]
     let kb = macos_ps_rss_kb(pid).unwrap_or(0);
     #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     let kb = 0;
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(unix))]
     let kb = 0;
     kb
 }
