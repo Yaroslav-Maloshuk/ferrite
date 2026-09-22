@@ -42,3 +42,7 @@ jobs:
             if ($hit.results.Count -lt 1) { throw "search returned no hits" }
             "smoke: PASS"
           } finally { Stop-Process -Id $p.Id -Force }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ferrite-windows-x86_64
+          path: target/release/ferrite.exe
