@@ -178,12 +178,12 @@ Notes:
   both architectures validate (`uname -m` = x86_64 / aarch64).
 - macOS (Apple Silicon and Intel) — native; Apple Accelerate BLAS via
   `--features accelerate`. x86_64 builds cross-compile from Apple Silicon.
-- Windows (x86_64) — cross-compiled (mingw-w64) and confirmed as PE32+; a native
-  MSVC build runs on `windows-latest` CI. Docker is Linux-only.
+- Windows (x86_64) — cross-compiles locally (mingw-w64); not currently shipped
+  in CI releases. Docker is Linux-only.
 
-All six binaries (macOS arm64/x86_64, Linux amd64/arm64, Windows x86_64) are
-produced by the release CI (`.github/workflows/release.yml`) and tagged via
-`v*` -> GitHub Release.
+The release CI (`.github/workflows/release.yml`) builds the tagged (`v*`)
+GitHub Release for the four shipped targets; Windows CI builds were dropped
+after costing more runner-hours than the platform's demand justifies.
 
 Inference is CPU-only on every platform (`Device::Cpu`); there is no GPU/Metal
 backend. `peak_rss_mb` uses a true per-process high-water mark on Linux
