@@ -28,7 +28,11 @@ jobs:
           elif [ "$RUNNER_OS" = "macOS" ]; then
             brew install protobuf
           else
-            choco install protobuf -y
+            # The community Chocolatey 'protobuf' package no longer exists; fetch the
+            # official win64 build directly (pinned).
+            curl -L -o "$RUNNER_TEMP/protoc.zip" https://github.com/protocolbuffers/protobuf/releases/download/v25.6/protoc-25.6-win64.zip
+            mkdir -p "$RUNNER_TEMP/protoc" && unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+            echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
           fi
       - run: cargo fmt --check
       - run: cargo clippy --features bench --all-targets -- -D warnings
@@ -68,7 +72,11 @@ jobs:
           elif [ "$RUNNER_OS" = "macOS" ]; then
             brew install protobuf
           else
-            choco install protobuf -y
+            # The community Chocolatey 'protobuf' package no longer exists; fetch the
+            # official win64 build directly (pinned).
+            curl -L -o "$RUNNER_TEMP/protoc.zip" https://github.com/protocolbuffers/protobuf/releases/download/v25.6/protoc-25.6-win64.zip
+            mkdir -p "$RUNNER_TEMP/protoc" && unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+            echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
           fi
       - run: cargo build --release --bin ferrite --target ${{ matrix.target }}
       - run: cargo build --release --features bench --bin ferrite-bench --target ${{ matrix.target }}
